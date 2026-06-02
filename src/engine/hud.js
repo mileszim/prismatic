@@ -2,23 +2,28 @@
 // bright-line frame, AF-area brackets, the central ground-glass focusing screen
 // with microprism collar + split-image prism, the exposure readouts, and the
 // focus-distance ladder with its depth-of-field bracket.
+//
+// The focusing screen is driven by the real projected geometry, not a single
+// "subject distance": every line is sheared/scrambled by ITS OWN defocus, so a
+// near edge stays broken while the camera is focused far (and vice-versa) — like
+// a real split-image + microprism screen.
 
-import { INK } from './config.js';
+import { INK, PAPER } from './config.js';
 import { ISOS, NEARF, FARF, focusLabel } from '../constants.js';
-import { makeProjector, toScreen } from './projection.js';
 import { fieldRect, roundRectPath } from './layout.js';
 
 const SPLIT_R = 22; // radius of the split-image spot
 const SPLIT_GAIN = 15; // px disparity per unit of log-distance defocus
-const SPLIT_MAX = 14; // max half-shift (px)
+const SPLIT_MAX = 16; // max half-shift (px)
 
 const MICRO_INNER = SPLIT_R; // microprism collar inner radius
 const MICRO_OUTER = 40; // microprism collar outer radius
-const MICRO_GAIN = 8; // facet displacement per unit of log-distance defocus
-const MICRO_MAX = 5; // max facet displacement (px)
+const MICRO_GAIN = 9; // facet displacement per unit of log-distance defocus
+const MICRO_MAX = 6; // max facet displacement (px)
 const CELL = 4; // microprism facet size (px)
 const GLASS_R = 64; // ground-glass / spot-meter reference circle
 const TWO_PI = Math.PI * 2;
+const LOG_RANGE = Math.log(FARF / NEARF);
 
 // deterministic per-facet pseudo-random angle (stable while the view is still,
 // so the collar shimmers as the camera moves rather than buzzing in place)
@@ -27,35 +32,47 @@ function facetHash(x, y) {
   return s - Math.floor(s);
 }
 
-export function createHud(W, H, objects) {
+export function createHud(W, H) {
   const FIELD = fieldRect(W, H);
+  const cxm = W / 2, cym = H / 2;
   const LX0 = W * 0.28, LX1 = W * 0.72;
 
+  // collar depth-key sampling window
+  const bx0 = Math.round(cxm - MICRO_OUTER);
+  const by0 = Math.round(cym - MICRO_OUTER);
+  const bw = MICRO_OUTER * 2, bh = MICRO_OUTER * 2;
+
+  // cache the depth pixels per scene render (the projected-segment array gets a
+  // fresh reference each render, so an identity check tells us when to re-read)
+  let lastDrawn = null;
+  let depthBuf = null;
+
   const ladderX = (d) => {
-    const t = Math.log(Math.max(d, NEARF) / NEARF) / Math.log(FARF / NEARF);
+    const t = Math.log(Math.max(d, NEARF) / NEARF) / LOG_RANGE;
     return LX0 + Math.min(1, Math.max(0, t)) * (LX1 - LX0);
   };
 
-  // Depth (m) of the object nearest the centre of the spot, or null if none.
-  function centerSubjectDepth(state) {
-    const proj = makeProjector(state.yaw, state.pitch, state.camX, state.camZ);
-    let subjDepth = null, bestD2 = 230 * 230;
-    for (const o of objects) {
-      const cam = proj([o.x, 3, o.z]);
-      if (cam.z <= 0.4) continue;
-      const s = toScreen(cam, W, H);
-      const d2 = (s.x - W / 2) ** 2 + (s.y - H / 2) ** 2;
-      if (d2 < bestD2) { bestD2 = d2; subjDepth = cam.z; }
-    }
-    return subjDepth;
-  }
+  function draw(ctx, state, scene) {
+    const sharp = scene.sharp;
+    const drawn = scene.getDrawn();
 
-  function draw(ctx, state, sharp) {
+    if (drawn !== lastDrawn) {
+      lastDrawn = drawn;
+      depthBuf = scene.depth.getContext('2d').getImageData(bx0, by0, bw, bh).data;
+    }
+
+    // Signed split-image shear for a feature at distance z: zero at the focal
+    // plane, growing (and flipping sign across it) with log-distance defocus.
+    const F = state.focus;
+    const shift = (z) => {
+      const d = (Math.log(F / (z < NEARF ? NEARF : z)) / LOG_RANGE) * SPLIT_GAIN;
+      return d < -SPLIT_MAX ? -SPLIT_MAX : d > SPLIT_MAX ? SPLIT_MAX : d;
+    };
+
     ctx.save();
     ctx.strokeStyle = INK;
     ctx.fillStyle = INK;
     ctx.lineCap = 'butt';
-    const cxm = W / 2, cym = H / 2;
 
     // bright-line frame (rounded — "through the eyepiece")
     ctx.lineWidth = 2;
@@ -83,25 +100,13 @@ export function createHud(W, H, objects) {
     ctx.moveTo(ax1 - abl, ay1); ctx.lineTo(ax1, ay1); ctx.lineTo(ax1, ay1 - abl);
     ctx.stroke();
 
-    // central focusing screen ------------------------------------------------
-    // Defocus is measured in log-distance (like a real focus-ring throw) so the
-    // split-image and microprism slide evenly across the whole range instead of
-    // sitting pinned until focus is nearly reached.
-    const subj = centerSubjectDepth(state);
-    let dx = 0, micro = 0;
-    if (subj != null) {
-      const diff = Math.log(state.focus / subj) / Math.log(FARF / NEARF);
-      dx = Math.max(-SPLIT_MAX, Math.min(SPLIT_MAX, diff * SPLIT_GAIN));
-      micro = Math.min(MICRO_MAX, Math.abs(diff) * MICRO_GAIN);
-    }
-
     // ground-glass / spot-meter reference circle
     ctx.lineWidth = 1.5;
     ctx.beginPath(); ctx.arc(cxm, cym, GLASS_R, 0, TWO_PI); ctx.stroke();
 
-    // microprism collar: tile the sharp scene into facets, each refracted in a
-    // different direction by an amount set by defocus — scrambled out of focus,
-    // resolving to a clean image as focus is reached.
+    // microprism collar: tile the sharp scene into facets, each refracted by an
+    // amount set by the LOCAL line's defocus (read from the depth key) — a near
+    // line scrambles even when the background is sharp, and vice-versa.
     if (sharp) {
       ctx.save();
       ctx.beginPath();
@@ -111,11 +116,24 @@ export function createHud(W, H, objects) {
       for (let yy = -MICRO_OUTER; yy < MICRO_OUTER; yy += CELL) {
         for (let xx = -MICRO_OUTER; xx < MICRO_OUTER; xx += CELL) {
           const px = cxm + xx, py = cym + yy;
+          let disp = 0;
+          if (depthBuf) {
+            const lx = Math.round(px + CELL / 2 - bx0);
+            const ly = Math.round(py + CELL / 2 - by0);
+            if (lx >= 0 && ly >= 0 && lx < bw && ly < bh) {
+              const v = depthBuf[(ly * bw + lx) * 4];
+              if (v > 0) {
+                const z = NEARF * Math.pow(FARF / NEARF, (v - 1) / 254);
+                disp = Math.abs(Math.log(F / z) / LOG_RANGE) * MICRO_GAIN;
+                if (disp > MICRO_MAX) disp = MICRO_MAX;
+              }
+            }
+          }
           let ox = 0, oy = 0;
-          if (micro > 0) {
+          if (disp > 0) {
             const a = facetHash(px, py) * TWO_PI;
-            ox = Math.cos(a) * micro;
-            oy = Math.sin(a) * micro;
+            ox = Math.cos(a) * disp;
+            oy = Math.sin(a) * disp;
           }
           ctx.drawImage(sharp, px + ox, py + oy, CELL, CELL, px, py, CELL, CELL);
         }
@@ -125,31 +143,43 @@ export function createHud(W, H, objects) {
       ctx.beginPath(); ctx.arc(cxm, cym, MICRO_OUTER, 0, TWO_PI); ctx.stroke();
     }
 
-    // split-image prism: sharp scene with the top half slid +dx and the bottom
-    // half -dx. A feature crossing the seam breaks apart out of focus and lines
-    // up (matching the surroundings) at focus.
-    if (sharp) {
-      ctx.save();
-      ctx.beginPath();
-      ctx.moveTo(cxm - SPLIT_R, cym);
-      ctx.lineTo(cxm + SPLIT_R, cym);
-      ctx.arc(cxm, cym, SPLIT_R, 0, Math.PI, true);
-      ctx.closePath();
-      ctx.clip();
-      ctx.drawImage(sharp, dx, 0);
-      ctx.restore();
-      ctx.save();
-      ctx.beginPath();
-      ctx.moveTo(cxm - SPLIT_R, cym);
-      ctx.lineTo(cxm + SPLIT_R, cym);
-      ctx.arc(cxm, cym, SPLIT_R, 0, Math.PI, false);
-      ctx.closePath();
-      ctx.clip();
-      ctx.drawImage(sharp, -dx, 0);
-      ctx.restore();
+    // split-image prism: the same wireframe, redrawn with the top half sheared
+    // +shift and the bottom half -shift, each line by its own depth. A feature on
+    // the focal plane has zero shift (continuous across the seam); anything else
+    // breaks apart — the amount and direction reading out its defocus.
+    if (drawn && drawn.length) {
+      const xMin = cxm - SPLIT_R - SPLIT_MAX, xMax = cxm + SPLIT_R + SPLIT_MAX;
+      const yMin = cym - SPLIT_R, yMax = cym + SPLIT_R;
+      const half = (sign, top) => {
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(cxm - SPLIT_R, cym);
+        ctx.lineTo(cxm + SPLIT_R, cym);
+        ctx.arc(cxm, cym, SPLIT_R, 0, Math.PI, top);
+        ctx.closePath();
+        ctx.clip();
+        ctx.fillStyle = PAPER;
+        ctx.fillRect(cxm - SPLIT_R, cym - SPLIT_R, SPLIT_R * 2, SPLIT_R * 2);
+        ctx.strokeStyle = INK;
+        ctx.lineWidth = 1.4;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        for (const s of drawn) {
+          if (Math.max(s.ax, s.bx) < xMin || Math.min(s.ax, s.bx) > xMax) continue;
+          if (Math.max(s.ay, s.by) < yMin || Math.min(s.ay, s.by) > yMax) continue;
+          ctx.moveTo(s.ax + sign * shift(s.za), s.ay);
+          ctx.lineTo(s.bx + sign * shift(s.zb), s.by);
+        }
+        ctx.stroke();
+        ctx.restore();
+      };
+      half(1, true); // upper half, sheared +
+      half(-1, false); // lower half, sheared -
     }
 
     // spot outline + the prism seam
+    ctx.strokeStyle = INK;
+    ctx.lineCap = 'butt';
     ctx.lineWidth = 1.5;
     ctx.beginPath(); ctx.arc(cxm, cym, SPLIT_R, 0, TWO_PI); ctx.stroke();
     ctx.lineWidth = 1;

@@ -22,7 +22,7 @@ export function createViewfinder(canvas, { onFocus, onCapture } = {}) {
   const scene = createSceneRenderer(W, H, segs);
   const motion = createMotionBlur(W, H);
   const grain = createGrain(W, H);
-  const hud = createHud(W, H, objects);
+  const hud = createHud(W, H);
 
   // shutterSec drives motion blur; expo (stops) drives the exposure wash.
   const state = {
@@ -102,7 +102,7 @@ export function createViewfinder(canvas, { onFocus, onCapture } = {}) {
       if (onCapture) onCapture(dataURL);
     }
 
-    hud.draw(ctx, state, scene.sharp);
+    hud.draw(ctx, state, scene);
     rafId = requestAnimationFrame(frame);
   }
   rafId = requestAnimationFrame(frame);
