@@ -65,9 +65,12 @@ export function createSceneRenderer(W, H, segs) {
   let drawnSegs = [];
 
   // Composite `temp` (the current band) onto the main canvas, blurred by `blur`
-  // px. Down-samples by repeated halving (a box average that keeps thin lines
-  // from dropping out), then a single up-scale whose smoothing spreads the ink
-  // — fainter as it widens, exactly like a real circle of confusion.
+  // px. Down-samples by repeated halving, then up-samples by repeated doubling
+  // back to full size. Mirroring the pyramid on the way up keeps every scale
+  // step at 2x, so the bilinear interpolation compounds into a smooth,
+  // near-Gaussian spread instead of the blocky facets a single large up-scale
+  // leaves behind — fainter as it widens, exactly like a real circle of
+  // confusion. drawImage only, so it renders identically across browsers.
   function drawWithBlur(blur) {
     if (blur < 1) { ctx.drawImage(temp, 0, 0); return; }
     const factor = blur < MAX_BLUR ? blur : MAX_BLUR;
@@ -85,12 +88,19 @@ export function createSceneRenderer(W, H, segs) {
       const c = dstC, cx = dstCtx;
       dstC = otherC; dstCtx = otherCtx; otherC = c; otherCtx = cx;
     };
+    // down the pyramid: halve until we reach the small buffer
     while (sw > tw * 2 || sh > th * 2) {
       step(Math.max(tw, sw >> 1), Math.max(th, sh >> 1));
     }
-    step(tw, th); // final exact down-scale
+    step(tw, th); // exact smallest scale — this sets the blur radius
+    // back up the pyramid: double until we reach full size. Each 2x step's
+    // smoothing stacks, so the reconstruction is smooth rather than blocky.
+    while (sw < W >> 1 || sh < H >> 1) {
+      step(Math.min(W, sw << 1), Math.min(H, sh << 1));
+    }
+    step(W, H); // exact full size
     ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(srcC, 0, 0, tw, th, 0, 0, W, H); // up-scale = the blur
+    ctx.drawImage(srcC, 0, 0);
   }
 
   function render(state) {
