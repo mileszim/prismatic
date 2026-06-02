@@ -65,42 +65,41 @@ export function createSceneRenderer(W, H, segs) {
   let drawnSegs = [];
 
   // Composite `temp` (the current band) onto the main canvas, blurred by `blur`
-  // px. Down-samples by repeated halving, then up-samples by repeated doubling
-  // back to full size. Mirroring the pyramid on the way up keeps every scale
-  // step at 2x, so the bilinear interpolation compounds into a smooth,
-  // near-Gaussian spread instead of the blocky facets a single large up-scale
-  // leaves behind — fainter as it widens, exactly like a real circle of
-  // confusion. drawImage only, so it renders identically across browsers.
+  // px. This is a separable box blur done at FULL resolution: the band is
+  // averaged against copies of itself shifted along x, then along y. Working at
+  // full res (no down-sample buffer) is what keeps it steady — there's no coarse
+  // grid for thin lines to snap to, so the image doesn't crawl or sparkle as the
+  // focus ring and camera move. Two passes per axis turn the flat box kernel
+  // into a soft tent, close to the Gaussian `ctx.filter` used to give. Uses only
+  // drawImage + globalAlpha, so it renders identically on Chrome and Safari/iOS.
+  //
+  // Each pass accumulates as a running mean: compositing the k-th shifted copy
+  // with globalAlpha = 1/(k+1) (source-over) leaves an exact average of all the
+  // copies — and it averages the alpha channel too, so line edges feather out.
+  const MAX_TAPS = 13; // cap taps per pass so wide blurs stay cheap on mobile
+  function boxPass(src, dc, r, horiz) {
+    dc.setTransform(1, 0, 0, 1, 0, 0);
+    dc.clearRect(0, 0, W, H);
+    const taps = Math.min(2 * r + 1, MAX_TAPS);
+    const span = 2 * r;
+    for (let i = 0; i < taps; i++) {
+      const o = taps === 1 ? 0 : -r + Math.round((i * span) / (taps - 1));
+      dc.globalAlpha = 1 / (i + 1);
+      dc.drawImage(src, horiz ? o : 0, horiz ? 0 : o);
+    }
+    dc.globalAlpha = 1;
+  }
+
   function drawWithBlur(blur) {
     if (blur < 1) { ctx.drawImage(temp, 0, 0); return; }
-    const factor = blur < MAX_BLUR ? blur : MAX_BLUR;
-    const tw = Math.max(2, Math.round(W / factor));
-    const th = Math.max(2, Math.round(H / factor));
-
-    let srcC = temp, sw = W, sh = H;
-    let dstC = dnA, dstCtx = dnAc, otherC = dnB, otherCtx = dnBc;
-    const step = (nw, nh) => {
-      dstCtx.setTransform(1, 0, 0, 1, 0, 0);
-      dstCtx.clearRect(0, 0, nw, nh);
-      dstCtx.imageSmoothingEnabled = true;
-      dstCtx.drawImage(srcC, 0, 0, sw, sh, 0, 0, nw, nh);
-      srcC = dstC; sw = nw; sh = nh;
-      const c = dstC, cx = dstCtx;
-      dstC = otherC; dstCtx = otherCtx; otherC = c; otherCtx = cx;
-    };
-    // down the pyramid: halve until we reach the small buffer
-    while (sw > tw * 2 || sh > th * 2) {
-      step(Math.max(tw, sw >> 1), Math.max(th, sh >> 1));
-    }
-    step(tw, th); // exact smallest scale — this sets the blur radius
-    // back up the pyramid: double until we reach full size. Each 2x step's
-    // smoothing stacks, so the reconstruction is smooth rather than blocky.
-    while (sw < W >> 1 || sh < H >> 1) {
-      step(Math.min(W, sw << 1), Math.min(H, sh << 1));
-    }
-    step(W, H); // exact full size
-    ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(srcC, 0, 0);
+    // per-pass radius; two tent passes of radius r give std ~= 0.82*2r, so
+    // halving `blur` keeps the perceived spread close to the old Gaussian.
+    const r = Math.max(1, Math.min(MAX_BLUR, Math.round(blur * 0.5)));
+    boxPass(temp, dnAc, r, true);  // horizontal -> dnA
+    boxPass(dnA, dnBc, r, false);  // vertical   -> dnB
+    boxPass(dnB, dnAc, r, true);   // horizontal -> dnA  (2nd pass = tent)
+    boxPass(dnA, dnBc, r, false);  // vertical   -> dnB
+    ctx.drawImage(dnB, 0, 0);
   }
 
   function render(state) {
