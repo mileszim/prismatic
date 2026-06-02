@@ -31,7 +31,7 @@ export default function App() {
         isoIdx={isoIdx}
         setIsoIdx={setIsoIdx}
       />
-      <div className="credit">drag to look · click to focus</div>
+      <div className="credit">w/s move · a/d turn · drag to look · click to focus</div>
     </div>
   );
 }

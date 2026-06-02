@@ -21,14 +21,20 @@ export function createViewfinder(canvas, { onFocus } = {}) {
   const grain = createGrain(W, H);
   const hud = createHud(W, H, objects);
 
-  const state = { fnum: 2.8, focus: 12, isoIdx: 2, yaw: 0, pitch: 0 };
+  const state = { fnum: 2.8, focus: 12, isoIdx: 2, yaw: 0, pitch: 0, camX: 0, camZ: 0 };
   let sceneDirty = true;
   const markDirty = () => { sceneDirty = true; };
 
   const input = createInput(canvas, { state, W, H, objects, markDirty, onFocus });
 
   let rafId = 0;
-  function frame() {
+  let lastT = 0;
+  function frame(t) {
+    // Apply held-key camera movement, scaled by frame time for smooth glide.
+    const dt = lastT ? Math.min(0.05, (t - lastT) / 1000) : 0;
+    lastT = t;
+    input.update(dt);
+
     // The wireframe only needs re-rendering when the view or optics change;
     // grain is regenerated every frame so it shimmers like real film.
     if (sceneDirty) { scene.render(state); sceneDirty = false; }

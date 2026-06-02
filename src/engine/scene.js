@@ -20,7 +20,7 @@ export function createSceneRenderer(W, H, segs) {
   const tctx = temp.getContext('2d');
 
   function render(state) {
-    const proj = makeProjector(state.yaw, state.pitch);
+    const proj = makeProjector(state.yaw, state.pitch, state.camX, state.camZ);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, W, H);
     ctx.fillStyle = PAPER;

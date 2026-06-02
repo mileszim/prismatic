@@ -20,7 +20,7 @@ export function createHud(W, H, objects) {
   // Split-image offset: how far the subject under the crosshair is from the
   // focal plane. Aligned (0) when in focus, sliding apart as it drifts.
   function splitOffset(state) {
-    const proj = makeProjector(state.yaw, state.pitch);
+    const proj = makeProjector(state.yaw, state.pitch, state.camX, state.camZ);
     let subjDepth = null, bestD2 = 230 * 230;
     for (const o of objects) {
       const cam = proj([o.x, 3, o.z]);
