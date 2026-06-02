@@ -19,6 +19,14 @@ export function createSceneRenderer(W, H, segs) {
   temp.height = H;
   const tctx = temp.getContext('2d');
 
+  // A second, fully-sharp render of the same wireframe. The split-image
+  // rangefinder samples this so its halves stay crisp regardless of the
+  // depth-of-field blur on the main image.
+  const sharp = document.createElement('canvas');
+  sharp.width = W;
+  sharp.height = H;
+  const sctx = sharp.getContext('2d');
+
   function render(state) {
     const proj = makeProjector(state.yaw, state.pitch, state.camX, state.camZ);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -68,7 +76,19 @@ export function createSceneRenderer(W, H, segs) {
       ctx.drawImage(temp, 0, 0);
     }
     ctx.filter = 'none';
+
+    // sharp pass (for the rangefinder split-image)
+    sctx.setTransform(1, 0, 0, 1, 0, 0);
+    sctx.clearRect(0, 0, W, H);
+    sctx.fillStyle = PAPER;
+    sctx.fillRect(0, 0, W, H);
+    sctx.strokeStyle = INK;
+    sctx.lineCap = 'round';
+    sctx.lineWidth = 1.4;
+    sctx.beginPath();
+    for (const c of drawn) { sctx.moveTo(c.ax, c.ay); sctx.lineTo(c.bx, c.by); }
+    sctx.stroke();
   }
 
-  return { canvas, render };
+  return { canvas, sharp, render };
 }

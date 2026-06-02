@@ -53,7 +53,7 @@ export function createViewfinder(canvas, { onFocus } = {}) {
     drawVignette(ctx, W, H);
     ctx.restore();
 
-    hud.draw(ctx, state);
+    hud.draw(ctx, state, scene.sharp);
     rafId = requestAnimationFrame(frame);
   }
   rafId = requestAnimationFrame(frame);

@@ -8,6 +8,10 @@ import { ISOS, NEARF, FARF, focusLabel } from '../constants.js';
 import { makeProjector, toScreen } from './projection.js';
 import { fieldRect, roundRectPath } from './layout.js';
 
+const SPLIT_R = 22; // radius of the split-image spot
+const SPLIT_GAIN = 30; // px disparity per unit of normalised defocus
+const SPLIT_MAX = 12; // max half-shift (px)
+
 export function createHud(W, H, objects) {
   const FIELD = fieldRect(W, H);
   const LX0 = W * 0.28, LX1 = W * 0.72;
@@ -17,9 +21,10 @@ export function createHud(W, H, objects) {
     return LX0 + Math.min(1, Math.max(0, t)) * (LX1 - LX0);
   };
 
-  // Split-image offset: how far the subject under the crosshair is from the
-  // focal plane. Aligned (0) when in focus, sliding apart as it drifts.
-  function splitOffset(state) {
+  // Horizontal disparity (px) of the split-image halves: the subject under the
+  // spot is found, and the shift is proportional to how far the focal plane is
+  // from it — zero (aligned) at correct focus, opposite signs front/back focus.
+  function splitShift(state) {
     const proj = makeProjector(state.yaw, state.pitch, state.camX, state.camZ);
     let subjDepth = null, bestD2 = 230 * 230;
     for (const o of objects) {
@@ -30,11 +35,11 @@ export function createHud(W, H, objects) {
       if (d2 < bestD2) { bestD2 = d2; subjDepth = cam.z; }
     }
     if (subjDepth == null) return 0;
-    const v = 8 * (state.focus - subjDepth) / Math.max(subjDepth, state.focus, 1);
-    return Math.max(-8, Math.min(8, v));
+    const norm = (state.focus - subjDepth) / Math.max(subjDepth, state.focus, 1);
+    return Math.max(-SPLIT_MAX, Math.min(SPLIT_MAX, norm * SPLIT_GAIN));
   }
 
-  function draw(ctx, state) {
+  function draw(ctx, state, sharp) {
     ctx.save();
     ctx.strokeStyle = INK;
     ctx.fillStyle = INK;
@@ -68,22 +73,46 @@ export function createHud(W, H, objects) {
     ctx.stroke();
 
     // central focusing screen
-    const split = splitOffset(state);
     ctx.lineWidth = 1.5;
     ctx.beginPath(); ctx.arc(cxm, cym, 64, 0, Math.PI * 2); ctx.stroke(); // ground glass
     ctx.save();
     ctx.setLineDash([2, 4]);
     ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.arc(cxm, cym, 30, 0, Math.PI * 2); ctx.stroke(); // microprism collar
+    ctx.beginPath(); ctx.arc(cxm, cym, 32, 0, Math.PI * 2); ctx.stroke(); // microprism collar
     ctx.restore();
+
+    // split-image prism: show the sharp scene inside the spot, with the top
+    // half slid +dx and the bottom half -dx. A feature crossing the seam breaks
+    // apart out of focus and lines up (matching the surroundings) at focus.
+    const dx = splitShift(state);
+    if (sharp) {
+      // top half
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(cxm - SPLIT_R, cym);
+      ctx.lineTo(cxm + SPLIT_R, cym);
+      ctx.arc(cxm, cym, SPLIT_R, 0, Math.PI, true);
+      ctx.closePath();
+      ctx.clip();
+      ctx.drawImage(sharp, dx, 0);
+      ctx.restore();
+      // bottom half
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(cxm - SPLIT_R, cym);
+      ctx.lineTo(cxm + SPLIT_R, cym);
+      ctx.arc(cxm, cym, SPLIT_R, 0, Math.PI, false);
+      ctx.closePath();
+      ctx.clip();
+      ctx.drawImage(sharp, -dx, 0);
+      ctx.restore();
+    }
+
+    // spot outline + the prism seam across the middle
     ctx.lineWidth = 1.5;
-    ctx.beginPath(); ctx.arc(cxm, cym, 16, 0, Math.PI * 2); ctx.stroke(); // split-image circle
-    ctx.beginPath(); ctx.moveTo(cxm - 16, cym); ctx.lineTo(cxm + 16, cym); ctx.stroke(); // prism seam
-    ctx.beginPath(); // the "test line": continuous in focus, broken when out of focus
-    ctx.moveTo(cxm + split, cym - 16); ctx.lineTo(cxm + split, cym);
-    ctx.moveTo(cxm - split, cym); ctx.lineTo(cxm - split, cym + 16);
-    ctx.stroke();
-    ctx.fillRect(cxm - 1.5, cym - 1.5, 3, 3);
+    ctx.beginPath(); ctx.arc(cxm, cym, SPLIT_R, 0, Math.PI * 2); ctx.stroke();
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(cxm - SPLIT_R, cym); ctx.lineTo(cxm + SPLIT_R, cym); ctx.stroke();
 
     // exposure readouts (bottom corners)
     ctx.font = "700 15px 'Courier New', monospace";
