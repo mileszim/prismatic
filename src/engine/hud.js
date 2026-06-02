@@ -9,16 +9,15 @@ import { makeProjector, toScreen } from './projection.js';
 import { fieldRect, roundRectPath } from './layout.js';
 
 const SPLIT_R = 22; // radius of the split-image spot
-const SPLIT_GAIN = 30; // px disparity per unit of normalised defocus
-const SPLIT_MAX = 12; // max half-shift (px)
+const SPLIT_GAIN = 15; // px disparity per unit of log-distance defocus
+const SPLIT_MAX = 14; // max half-shift (px)
 
 const MICRO_INNER = SPLIT_R; // microprism collar inner radius
 const MICRO_OUTER = 40; // microprism collar outer radius
-const MICRO_GAIN = 11; // facet displacement per unit of defocus
+const MICRO_GAIN = 8; // facet displacement per unit of log-distance defocus
 const MICRO_MAX = 5; // max facet displacement (px)
 const CELL = 4; // microprism facet size (px)
 const GLASS_R = 64; // ground-glass / spot-meter reference circle
-const LOCK_THRESH = 0.035; // |defocus| small enough to read as "in focus"
 const TWO_PI = Math.PI * 2;
 
 // deterministic per-facet pseudo-random angle (stable while the view is still,
@@ -37,11 +36,8 @@ export function createHud(W, H, objects) {
     return LX0 + Math.min(1, Math.max(0, t)) * (LX1 - LX0);
   };
 
-  // Normalised defocus of the subject under the spot: 0 at correct focus,
-  // negative when focused in front of it, positive when focused behind. Null if
-  // there's no object near the centre. Drives the split shift, the microprism
-  // scramble, and the focus-confirm cue.
-  function focusMetric(state) {
+  // Depth (m) of the object nearest the centre of the spot, or null if none.
+  function centerSubjectDepth(state) {
     const proj = makeProjector(state.yaw, state.pitch, state.camX, state.camZ);
     let subjDepth = null, bestD2 = 230 * 230;
     for (const o of objects) {
@@ -51,8 +47,7 @@ export function createHud(W, H, objects) {
       const d2 = (s.x - W / 2) ** 2 + (s.y - H / 2) ** 2;
       if (d2 < bestD2) { bestD2 = d2; subjDepth = cam.z; }
     }
-    if (subjDepth == null) return null;
-    return (state.focus - subjDepth) / Math.max(subjDepth, state.focus, 1);
+    return subjDepth;
   }
 
   function draw(ctx, state, sharp) {
@@ -89,10 +84,16 @@ export function createHud(W, H, objects) {
     ctx.stroke();
 
     // central focusing screen ------------------------------------------------
-    const norm = focusMetric(state);
-    const dx = norm == null ? 0 : Math.max(-SPLIT_MAX, Math.min(SPLIT_MAX, norm * SPLIT_GAIN));
-    const micro = norm == null ? 0 : Math.min(MICRO_MAX, Math.abs(norm) * MICRO_GAIN);
-    const locked = norm != null && Math.abs(norm) < LOCK_THRESH;
+    // Defocus is measured in log-distance (like a real focus-ring throw) so the
+    // split-image and microprism slide evenly across the whole range instead of
+    // sitting pinned until focus is nearly reached.
+    const subj = centerSubjectDepth(state);
+    let dx = 0, micro = 0;
+    if (subj != null) {
+      const diff = Math.log(state.focus / subj) / Math.log(FARF / NEARF);
+      dx = Math.max(-SPLIT_MAX, Math.min(SPLIT_MAX, diff * SPLIT_GAIN));
+      micro = Math.min(MICRO_MAX, Math.abs(diff) * MICRO_GAIN);
+    }
 
     // ground-glass / spot-meter reference circle
     ctx.lineWidth = 1.5;
@@ -148,16 +149,11 @@ export function createHud(W, H, objects) {
       ctx.restore();
     }
 
-    // spot outline (thickens as a focus-confirm cue) + the prism seam
-    ctx.lineWidth = locked ? 2.6 : 1.5;
+    // spot outline + the prism seam
+    ctx.lineWidth = 1.5;
     ctx.beginPath(); ctx.arc(cxm, cym, SPLIT_R, 0, TWO_PI); ctx.stroke();
     ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(cxm - SPLIT_R, cym); ctx.lineTo(cxm + SPLIT_R, cym); ctx.stroke();
-
-    // focus-confirm dot below the screen when the split-image is aligned
-    if (locked) {
-      ctx.beginPath(); ctx.arc(cxm, cym + GLASS_R + 16, 4.5, 0, TWO_PI); ctx.fill();
-    }
 
     // exposure readouts (bottom corners)
     ctx.font = "700 15px 'Courier New', monospace";
