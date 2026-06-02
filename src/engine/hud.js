@@ -12,6 +12,22 @@ const SPLIT_R = 22; // radius of the split-image spot
 const SPLIT_GAIN = 30; // px disparity per unit of normalised defocus
 const SPLIT_MAX = 12; // max half-shift (px)
 
+const MICRO_INNER = SPLIT_R; // microprism collar inner radius
+const MICRO_OUTER = 40; // microprism collar outer radius
+const MICRO_GAIN = 11; // facet displacement per unit of defocus
+const MICRO_MAX = 5; // max facet displacement (px)
+const CELL = 4; // microprism facet size (px)
+const GLASS_R = 64; // ground-glass / spot-meter reference circle
+const LOCK_THRESH = 0.035; // |defocus| small enough to read as "in focus"
+const TWO_PI = Math.PI * 2;
+
+// deterministic per-facet pseudo-random angle (stable while the view is still,
+// so the collar shimmers as the camera moves rather than buzzing in place)
+function facetHash(x, y) {
+  const s = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453;
+  return s - Math.floor(s);
+}
+
 export function createHud(W, H, objects) {
   const FIELD = fieldRect(W, H);
   const LX0 = W * 0.28, LX1 = W * 0.72;
@@ -21,10 +37,11 @@ export function createHud(W, H, objects) {
     return LX0 + Math.min(1, Math.max(0, t)) * (LX1 - LX0);
   };
 
-  // Horizontal disparity (px) of the split-image halves: the subject under the
-  // spot is found, and the shift is proportional to how far the focal plane is
-  // from it — zero (aligned) at correct focus, opposite signs front/back focus.
-  function splitShift(state) {
+  // Normalised defocus of the subject under the spot: 0 at correct focus,
+  // negative when focused in front of it, positive when focused behind. Null if
+  // there's no object near the centre. Drives the split shift, the microprism
+  // scramble, and the focus-confirm cue.
+  function focusMetric(state) {
     const proj = makeProjector(state.yaw, state.pitch, state.camX, state.camZ);
     let subjDepth = null, bestD2 = 230 * 230;
     for (const o of objects) {
@@ -34,9 +51,8 @@ export function createHud(W, H, objects) {
       const d2 = (s.x - W / 2) ** 2 + (s.y - H / 2) ** 2;
       if (d2 < bestD2) { bestD2 = d2; subjDepth = cam.z; }
     }
-    if (subjDepth == null) return 0;
-    const norm = (state.focus - subjDepth) / Math.max(subjDepth, state.focus, 1);
-    return Math.max(-SPLIT_MAX, Math.min(SPLIT_MAX, norm * SPLIT_GAIN));
+    if (subjDepth == null) return null;
+    return (state.focus - subjDepth) / Math.max(subjDepth, state.focus, 1);
   }
 
   function draw(ctx, state, sharp) {
@@ -72,21 +88,46 @@ export function createHud(W, H, objects) {
     ctx.moveTo(ax1 - abl, ay1); ctx.lineTo(ax1, ay1); ctx.lineTo(ax1, ay1 - abl);
     ctx.stroke();
 
-    // central focusing screen
-    ctx.lineWidth = 1.5;
-    ctx.beginPath(); ctx.arc(cxm, cym, 64, 0, Math.PI * 2); ctx.stroke(); // ground glass
-    ctx.save();
-    ctx.setLineDash([2, 4]);
-    ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.arc(cxm, cym, 32, 0, Math.PI * 2); ctx.stroke(); // microprism collar
-    ctx.restore();
+    // central focusing screen ------------------------------------------------
+    const norm = focusMetric(state);
+    const dx = norm == null ? 0 : Math.max(-SPLIT_MAX, Math.min(SPLIT_MAX, norm * SPLIT_GAIN));
+    const micro = norm == null ? 0 : Math.min(MICRO_MAX, Math.abs(norm) * MICRO_GAIN);
+    const locked = norm != null && Math.abs(norm) < LOCK_THRESH;
 
-    // split-image prism: show the sharp scene inside the spot, with the top
-    // half slid +dx and the bottom half -dx. A feature crossing the seam breaks
-    // apart out of focus and lines up (matching the surroundings) at focus.
-    const dx = splitShift(state);
+    // ground-glass / spot-meter reference circle
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(cxm, cym, GLASS_R, 0, TWO_PI); ctx.stroke();
+
+    // microprism collar: tile the sharp scene into facets, each refracted in a
+    // different direction by an amount set by defocus — scrambled out of focus,
+    // resolving to a clean image as focus is reached.
     if (sharp) {
-      // top half
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(cxm, cym, MICRO_OUTER, 0, TWO_PI);
+      ctx.arc(cxm, cym, MICRO_INNER, 0, TWO_PI);
+      ctx.clip('evenodd');
+      for (let yy = -MICRO_OUTER; yy < MICRO_OUTER; yy += CELL) {
+        for (let xx = -MICRO_OUTER; xx < MICRO_OUTER; xx += CELL) {
+          const px = cxm + xx, py = cym + yy;
+          let ox = 0, oy = 0;
+          if (micro > 0) {
+            const a = facetHash(px, py) * TWO_PI;
+            ox = Math.cos(a) * micro;
+            oy = Math.sin(a) * micro;
+          }
+          ctx.drawImage(sharp, px + ox, py + oy, CELL, CELL, px, py, CELL, CELL);
+        }
+      }
+      ctx.restore();
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(cxm, cym, MICRO_OUTER, 0, TWO_PI); ctx.stroke();
+    }
+
+    // split-image prism: sharp scene with the top half slid +dx and the bottom
+    // half -dx. A feature crossing the seam breaks apart out of focus and lines
+    // up (matching the surroundings) at focus.
+    if (sharp) {
       ctx.save();
       ctx.beginPath();
       ctx.moveTo(cxm - SPLIT_R, cym);
@@ -96,7 +137,6 @@ export function createHud(W, H, objects) {
       ctx.clip();
       ctx.drawImage(sharp, dx, 0);
       ctx.restore();
-      // bottom half
       ctx.save();
       ctx.beginPath();
       ctx.moveTo(cxm - SPLIT_R, cym);
@@ -108,11 +148,16 @@ export function createHud(W, H, objects) {
       ctx.restore();
     }
 
-    // spot outline + the prism seam across the middle
-    ctx.lineWidth = 1.5;
-    ctx.beginPath(); ctx.arc(cxm, cym, SPLIT_R, 0, Math.PI * 2); ctx.stroke();
+    // spot outline (thickens as a focus-confirm cue) + the prism seam
+    ctx.lineWidth = locked ? 2.6 : 1.5;
+    ctx.beginPath(); ctx.arc(cxm, cym, SPLIT_R, 0, TWO_PI); ctx.stroke();
     ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(cxm - SPLIT_R, cym); ctx.lineTo(cxm + SPLIT_R, cym); ctx.stroke();
+
+    // focus-confirm dot below the screen when the split-image is aligned
+    if (locked) {
+      ctx.beginPath(); ctx.arc(cxm, cym + GLASS_R + 16, 4.5, 0, TWO_PI); ctx.fill();
+    }
 
     // exposure readouts (bottom corners)
     ctx.font = "700 15px 'Courier New', monospace";
