@@ -1,0 +1,617 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>FIELD CAMERA · BZ-720</title>
+<style>
+  :root{
+    --ink:#14110c;
+    --paper:#f4f0e5;
+    --frame:#d9d4c6;
+  }
+  *{ box-sizing:border-box; }
+  html,body{ margin:0; height:100%; }
+  body{
+    background:
+      repeating-linear-gradient(0deg, #b9b4a6, #b9b4a6 2px, #b4afa1 2px, #b4afa1 4px);
+    color:var(--ink);
+    font-family:"Courier New", ui-monospace, Menlo, monospace;
+    display:flex; align-items:center; justify-content:center;
+    min-height:100%;
+    padding:24px 16px;
+  }
+  .machine{
+    width:100%;
+    max-width:920px;
+  }
+  .scope{
+    position:relative;
+    border:3px solid var(--ink);
+    background:var(--paper);
+    box-shadow: 0 0 0 6px var(--frame), 0 14px 40px rgba(0,0,0,.35);
+    line-height:0;
+  }
+  canvas{
+    display:block;
+    width:100%;
+    height:auto;
+    cursor:crosshair;
+    touch-action:none;
+  }
+  .panel{
+    margin-top:14px;
+    border:3px solid var(--ink);
+    background:var(--paper);
+    box-shadow:0 0 0 6px var(--frame), 0 8px 22px rgba(0,0,0,.28);
+    padding:14px 18px 16px;
+    display:grid;
+    grid-template-columns:repeat(3, 1fr);
+    gap:18px 26px;
+  }
+  .ctrl{ display:flex; flex-direction:column; gap:7px; }
+  .ctrl .row{
+    display:flex; justify-content:space-between; align-items:baseline;
+    text-transform:uppercase; letter-spacing:.14em; font-size:12px; font-weight:700;
+  }
+  .ctrl .val{
+    font-size:15px; letter-spacing:.06em;
+    border-bottom:2px solid var(--ink);
+    padding:0 3px 1px;
+  }
+  .ctrl .hint{
+    font-size:9.5px; letter-spacing:.18em; opacity:.55; text-transform:uppercase;
+  }
+  input[type=range]{
+    -webkit-appearance:none; appearance:none;
+    width:100%; height:22px; background:transparent; margin:0; cursor:pointer;
+  }
+  input[type=range]::-webkit-slider-runnable-track{
+    height:22px; background:
+      linear-gradient(var(--ink),var(--ink)) center/100% 2px no-repeat;
+    border-left:2px solid var(--ink); border-right:2px solid var(--ink);
+  }
+  input[type=range]::-moz-range-track{
+    height:22px; background:
+      linear-gradient(var(--ink),var(--ink)) center/100% 2px no-repeat;
+    border-left:2px solid var(--ink); border-right:2px solid var(--ink);
+  }
+  input[type=range]::-webkit-slider-thumb{
+    -webkit-appearance:none; appearance:none;
+    width:14px; height:22px; background:var(--paper);
+    border:2px solid var(--ink); margin-top:0;
+  }
+  input[type=range]::-moz-range-thumb{
+    width:14px; height:22px; background:var(--paper);
+    border:2px solid var(--ink); border-radius:0;
+  }
+  .credit{
+    margin-top:10px; text-align:center; font-size:10px; letter-spacing:.32em;
+    text-transform:uppercase; opacity:.5;
+  }
+</style>
+</head>
+<body>
+  <div class="machine">
+    <div class="scope">
+      <canvas id="view" width="920" height="600"></canvas>
+    </div>
+
+    <div class="panel">
+      <div class="ctrl">
+        <div class="row"><span>Aperture</span><span class="val" id="apVal">ƒ/2.8</span></div>
+        <input id="aperture" type="range" min="0" max="8" step="1" value="2" autocomplete="off">
+        <div class="hint">shallow ◄──── depth of field ────► deep</div>
+      </div>
+
+      <div class="ctrl">
+        <div class="row"><span>Focus</span><span class="val" id="foVal">12 M</span></div>
+        <input id="focus" type="range" min="0" max="1000" step="1" value="430" autocomplete="off">
+        <div class="hint">near ◄──── focal plane ────► ∞</div>
+      </div>
+
+      <div class="ctrl">
+        <div class="row"><span>ISO</span><span class="val" id="isoVal">400</span></div>
+        <input id="iso" type="range" min="0" max="6" step="1" value="2" autocomplete="off">
+        <div class="hint">clean ◄──── sensor grain ────► noisy</div>
+      </div>
+    </div>
+
+    <div class="credit">drag to look · click to focus</div>
+  </div>
+
+<script>
+(() => {
+  "use strict";
+
+  // ---- canvas setup ----------------------------------------------------
+  const view = document.getElementById('view');
+  const W = view.width, H = view.height;
+  const mainCtx = view.getContext('2d');
+
+  const sceneCanvas = document.createElement('canvas');
+  sceneCanvas.width = W; sceneCanvas.height = H;
+  const sceneCtx = sceneCanvas.getContext('2d');
+
+  const tempCanvas = document.createElement('canvas');
+  tempCanvas.width = W; tempCanvas.height = H;
+  const tctx = tempCanvas.getContext('2d');
+
+  const grainCanvas = document.createElement('canvas');
+  let grainCtx = grainCanvas.getContext('2d');
+
+  const INK   = '#14110c';
+  const PAPER = '#f4f0e5';
+
+  // ---- optics / camera constants --------------------------------------
+  const focal = 680;
+  const eyeH  = 2.4;
+  const NEARF = 1.5;     // nearest focusable distance (m)
+  const FARF  = 130;     // "infinity"
+  const BANDS = 12;      // depth slices for the DOF blur
+  const DOF_K = 34;      // overall defocus strength
+  const MAXBLUR = 9;
+
+  const STOPS = [1.4, 2, 2.8, 4, 5.6, 8, 11, 16, 22];
+  const ISOS  = [100, 200, 400, 800, 1600, 3200, 6400];
+
+  const state = {
+    fnum: 2.8,
+    focus: 12,
+    isoIdx: 2,
+    yaw: 0,
+    pitch: 0,
+  };
+  let sceneDirty = true;
+
+  // ---- scene geometry --------------------------------------------------
+  // Each segment: {a:[x,y,z], b:[x,y,z], w:lineWidth}
+  const segs = [];
+  const objects = [];   // {x,z} for radar + tap-to-focus
+
+  function seg(ax, ay, az, bx, by, bz, w) {
+    segs.push({ a:[ax,ay,az], b:[bx,by,bz], w: w || 1 });
+  }
+
+  function box(cx, cz, w, h, d) {
+    const x0=cx-w/2, x1=cx+w/2, z0=cz-d/2, z1=cz+d/2, y0=0, y1=h;
+    // bottom square
+    seg(x0,y0,z0, x1,y0,z0); seg(x1,y0,z0, x1,y0,z1);
+    seg(x1,y0,z1, x0,y0,z1); seg(x0,y0,z1, x0,y0,z0);
+    // top square
+    seg(x0,y1,z0, x1,y1,z0); seg(x1,y1,z0, x1,y1,z1);
+    seg(x1,y1,z1, x0,y1,z1); seg(x0,y1,z1, x0,y1,z0);
+    // verticals
+    seg(x0,y0,z0, x0,y1,z0); seg(x1,y0,z0, x1,y1,z0);
+    seg(x1,y0,z1, x1,y1,z1); seg(x0,y0,z1, x0,y1,z1);
+    objects.push({x:cx, z:cz});
+  }
+
+  function pyramid(cx, cz, base, h) {
+    const b=base/2, x0=cx-b, x1=cx+b, z0=cz-b, z1=cz+b;
+    // base
+    seg(x0,0,z0, x1,0,z0); seg(x1,0,z0, x1,0,z1);
+    seg(x1,0,z1, x0,0,z1); seg(x0,0,z1, x0,0,z0);
+    // slants to apex
+    seg(x0,0,z0, cx,h,cz); seg(x1,0,z0, cx,h,cz);
+    seg(x1,0,z1, cx,h,cz); seg(x0,0,z1, cx,h,cz);
+    objects.push({x:cx, z:cz});
+  }
+
+  function buildScene() {
+    segs.length = 0; objects.length = 0;
+    const zs = [3,4.5,6.5,9,12.5,17,23,31,42,56,75,100,125];
+    const xMax = 44, step = 8;
+
+    // longitudinal grid lines (run into the distance — split per z-step so
+    // a single line can be sharp where it crosses the focal plane)
+    for (let x = -xMax; x <= xMax; x += step) {
+      for (let k = 0; k < zs.length - 1; k++) {
+        seg(x, 0, zs[k], x, 0, zs[k+1], 0.9);
+      }
+    }
+    // transverse grid lines (constant distance)
+    for (const z of zs) {
+      seg(-xMax, 0, z, xMax, 0, z, 0.9);
+    }
+
+    // jagged mountain horizon (two ridges)
+    const frac = i => { const s = Math.sin(i*12.9898)*43758.5453; return s - Math.floor(s); };
+    function ridge(z, baseAmp, w, sd) {
+      const span = 130, n = 46;
+      let px = -span, py = 1 + frac(sd) * baseAmp;
+      for (let i = 1; i <= n; i++) {
+        const x = -span + (span*2) * (i/n);
+        const y = 1 + (0.35 + 0.65*frac(i*1.3 + sd)) * baseAmp;
+        seg(px, py, z, x, y, z, w);
+        px = x; py = y;
+      }
+    }
+    ridge(125, 30, 1.1, 7.7);
+    ridge(112, 18, 0.9, 3.1);
+
+    // scattered Battlezone-style obstacles across a range of depths
+    pyramid(-3, 11, 4, 5);
+    box(8, 9, 3, 3.5, 3);
+    box(-16, 16, 5, 6, 5);
+    pyramid(13, 22, 9, 11);
+    box(-26, 30, 2.2, 16, 2.2);   // obelisk
+    box(23, 40, 6, 9, 6);
+    pyramid(-9, 53, 13, 16);
+    box(5, 71, 9, 5.5, 9);
+  }
+  buildScene();
+
+  // ---- projection ------------------------------------------------------
+  function makeProjector() {
+    const cy = Math.cos(state.yaw), sy = Math.sin(state.yaw);
+    const cp = Math.cos(state.pitch), sp = Math.sin(state.pitch);
+    return p => {
+      const rx = p[0], ry = p[1] - eyeH, rz = p[2];
+      const x1 = rx*cy - rz*sy;
+      const z1 = rx*sy + rz*cy;
+      const y2 = ry*cp - z1*sp;
+      const z2 = ry*sp + z1*cp;
+      return { x:x1, y:y2, z:z2 };
+    };
+  }
+
+  function depthOf(point) {
+    return makeProjector()(point).z;
+  }
+
+  // ---- render the wireframe with depth-of-field ------------------------
+  function renderScene() {
+    const proj = makeProjector();
+    sceneCtx.setTransform(1,0,0,1,0,0);
+    sceneCtx.clearRect(0,0,W,H);
+    sceneCtx.fillStyle = PAPER;
+    sceneCtx.fillRect(0,0,W,H);
+
+    const NZ = 0.4;
+    const drawn = [];
+    for (const s of segs) {
+      let A = proj(s.a), B = proj(s.b);
+      if (A.z < NZ && B.z < NZ) continue;
+      if (A.z < NZ) { const t=(NZ-A.z)/(B.z-A.z);
+        A = {x:A.x+(B.x-A.x)*t, y:A.y+(B.y-A.y)*t, z:NZ}; }
+      else if (B.z < NZ) { const t=(NZ-B.z)/(A.z-B.z);
+        B = {x:B.x+(A.x-B.x)*t, y:B.y+(A.y-B.y)*t, z:NZ}; }
+      drawn.push({
+        ax: focal*A.x/A.z + W/2, ay: -focal*A.y/A.z + H/2,
+        bx: focal*B.x/B.z + W/2, by: -focal*B.y/B.z + H/2,
+        depth: (A.z + B.z) / 2,
+      });
+    }
+    // painter's order: far -> near
+    drawn.sort((p, q) => q.depth - p.depth);
+
+    const F = state.focus, f = state.fnum;
+    const per = Math.ceil(drawn.length / BANDS) || 1;
+    for (let bi = 0; bi < BANDS; bi++) {
+      const chunk = drawn.slice(bi*per, (bi+1)*per);
+      if (!chunk.length) continue;
+      let dsum = 0; for (const c of chunk) dsum += c.depth;
+      const d = dsum / chunk.length;
+
+      tctx.setTransform(1,0,0,1,0,0);
+      tctx.clearRect(0,0,W,H);
+      tctx.strokeStyle = INK;
+      tctx.lineCap = 'round';
+      tctx.lineWidth = Math.max(0.8, 2.3 - d*0.02);
+      tctx.beginPath();
+      for (const c of chunk) { tctx.moveTo(c.ax, c.ay); tctx.lineTo(c.bx, c.by); }
+      tctx.stroke();
+
+      // circle of confusion: distance from focal plane, scaled by aperture
+      let blur = (DOF_K / f) * Math.abs(d - F) / Math.max(d, F, 1);
+      if (blur > MAXBLUR) blur = MAXBLUR;
+      sceneCtx.filter = blur > 0.15 ? `blur(${blur.toFixed(2)}px)` : 'none';
+      sceneCtx.drawImage(tempCanvas, 0, 0);
+    }
+    sceneCtx.filter = 'none';
+  }
+
+  // ---- ISO grain + pixelation -----------------------------------------
+  const GRAIN = {
+    amt:   [0.035, 0.06, 0.09, 0.13, 0.19, 0.27, 0.36],
+    block: [    1,    1,    1,    2,    2,    3,    4],
+  };
+  function drawGrain(ctx) {
+    const amt = GRAIN.amt[state.isoIdx];
+    const block = GRAIN.block[state.isoIdx];
+    const gw = Math.ceil(W/block), gh = Math.ceil(H/block);
+    if (grainCanvas.width !== gw || grainCanvas.height !== gh) {
+      grainCanvas.width = gw; grainCanvas.height = gh;
+      grainCtx = grainCanvas.getContext('2d');
+    }
+    const img = grainCtx.createImageData(gw, gh);
+    const data = img.data;
+    const lightCut = 1 - amt*0.35;
+    for (let i = 0; i < gw*gh; i++) {
+      const k = i*4, r = Math.random();
+      if (r < amt) {                       // dark speck (film grain on paper)
+        data[k]=20; data[k+1]=18; data[k+2]=14;
+        data[k+3] = 50 + Math.random()*140;
+      } else if (r > lightCut) {           // bright speck (breaks up the ink)
+        data[k]=250; data[k+1]=248; data[k+2]=240;
+        data[k+3] = 30 + Math.random()*90;
+      } else {
+        data[k+3] = 0;
+      }
+    }
+    grainCtx.putImageData(img, 0, 0);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(grainCanvas, 0, 0, gw, gh, 0, 0, W, H);
+    ctx.imageSmoothingEnabled = true;
+  }
+
+  // ---- HUD -------------------------------------------------------------
+  function ladderX(d) {
+    const t = Math.log(Math.max(d,NEARF)/NEARF) / Math.log(FARF/NEARF);
+    return LX0 + Math.min(1, Math.max(0, t)) * (LX1 - LX0);
+  }
+  const LX0 = W*0.28, LX1 = W*0.72;
+
+  function focusLabel() {
+    return state.focus >= FARF*0.97 ? '∞' : Math.round(state.focus) + ' M';
+  }
+
+  // viewfinder field geometry (rounded "looking through the eyepiece" mask)
+  const FIELD = { x: 26, y: 26, w: W - 52, h: H - 52, r: 40 };
+  function roundRectPath(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y,     x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x,     y + h, r);
+    ctx.arcTo(x,     y + h, x,     y,     r);
+    ctx.arcTo(x,     y,     x + w, y,     r);
+    ctx.closePath();
+  }
+
+  function drawHUD(t) {
+    const ctx = mainCtx;
+    ctx.save();
+    ctx.strokeStyle = INK; ctx.fillStyle = INK;
+    ctx.lineWidth = 2; ctx.lineCap = 'butt';
+
+    const cxm = W / 2, cym = H / 2;
+
+    // ---- viewfinder bright-line frame (rounded — "through the eyepiece") ----
+    ctx.lineWidth = 2;
+    roundRectPath(ctx, FIELD.x, FIELD.y, FIELD.w, FIELD.h, FIELD.r);
+    ctx.stroke();
+    ctx.lineWidth = 1;
+    roundRectPath(ctx, FIELD.x + 7, FIELD.y + 7, FIELD.w - 14, FIELD.h - 14, FIELD.r - 7);
+    ctx.stroke();
+
+    // edge framing ticks (middle of each side)
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(cxm, FIELD.y - 5);             ctx.lineTo(cxm, FIELD.y + 13);
+    ctx.moveTo(cxm, FIELD.y + FIELD.h + 5);   ctx.lineTo(cxm, FIELD.y + FIELD.h - 13);
+    ctx.moveTo(FIELD.x - 5, cym);             ctx.lineTo(FIELD.x + 13, cym);
+    ctx.moveTo(FIELD.x + FIELD.w + 5, cym);   ctx.lineTo(FIELD.x + FIELD.w - 13, cym);
+    ctx.stroke();
+
+    // ---- AF-area brackets framing the focusing screen ----
+    const ax0 = W * 0.31, ax1 = W * 0.69, ay0 = H * 0.27, ay1 = H * 0.73, abl = 20;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(ax0, ay0 + abl); ctx.lineTo(ax0, ay0); ctx.lineTo(ax0 + abl, ay0);
+    ctx.moveTo(ax1 - abl, ay0); ctx.lineTo(ax1, ay0); ctx.lineTo(ax1, ay0 + abl);
+    ctx.moveTo(ax0, ay1 - abl); ctx.lineTo(ax0, ay1); ctx.lineTo(ax0 + abl, ay1);
+    ctx.moveTo(ax1 - abl, ay1); ctx.lineTo(ax1, ay1); ctx.lineTo(ax1, ay1 - abl);
+    ctx.stroke();
+
+    // ---- central focusing screen: ground-glass circle + microprism collar +
+    //      split-image prism. The split slides apart as the subject under the
+    //      crosshair drifts out of the focal plane, and snaps aligned in focus.
+    let subjDepth = null, bestD2 = 230 * 230;
+    const projC = makeProjector();
+    for (const o of objects) {
+      const p = projC([o.x, 3, o.z]);
+      if (p.z <= 0.4) continue;
+      const sx = focal * p.x / p.z + W / 2, sy = -focal * p.y / p.z + H / 2;
+      const d2 = (sx - cxm) ** 2 + (sy - cym) ** 2;
+      if (d2 < bestD2) { bestD2 = d2; subjDepth = p.z; }
+    }
+    let split = 0;
+    if (subjDepth != null) {
+      split = 8 * (state.focus - subjDepth) / Math.max(subjDepth, state.focus, 1);
+      split = Math.max(-8, Math.min(8, split));
+    }
+
+    // outer ground-glass / spot-meter circle
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(cxm, cym, 64, 0, Math.PI * 2); ctx.stroke();
+    // microprism collar (dotted ring)
+    ctx.save();
+    ctx.setLineDash([2, 4]);
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(cxm, cym, 30, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+    // split-image prism: inner circle + horizontal prism seam
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(cxm, cym, 16, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cxm - 16, cym); ctx.lineTo(cxm + 16, cym); ctx.stroke();
+    // the "test line": continuous in focus, broken when out of focus
+    ctx.beginPath();
+    ctx.moveTo(cxm + split, cym - 16); ctx.lineTo(cxm + split, cym);
+    ctx.moveTo(cxm - split, cym);      ctx.lineTo(cxm - split, cym + 16);
+    ctx.stroke();
+    ctx.fillRect(cxm - 1.5, cym - 1.5, 3, 3);
+
+    // ---- text readouts ----
+    ctx.font = "700 13px 'Courier New', monospace";
+    ctx.textBaseline = 'top';
+    ctx.fillText('FIELD CAMERA · BZ-720', 74, 40);
+    // blinking REC
+    if (Math.floor(t/600) % 2 === 0) {
+      ctx.textAlign = 'right';
+      ctx.fillText('REC', W-90, 40);
+      ctx.beginPath(); ctx.arc(W-76, 47, 4, 0, Math.PI*2); ctx.fill();
+      ctx.textAlign = 'left';
+    }
+
+    ctx.font = "700 15px 'Courier New', monospace";
+    ctx.textBaseline = 'bottom';
+    ctx.fillText('ƒ/' + STOPS[+aperture.value], 74, H-50);
+    ctx.fillText('ISO ' + ISOS[state.isoIdx], 74, H-30);
+    ctx.textAlign = 'right';
+    ctx.fillText('FOCUS ' + focusLabel(), W-74, H-50);
+    ctx.textAlign = 'left';
+
+    // ---- focus distance ladder + DOF bracket ----
+    const ly = H - 30;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(LX0, ly); ctx.lineTo(LX1, ly); ctx.stroke();
+    ctx.font = "700 9px 'Courier New', monospace";
+    ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    for (const d of [2,5,10,25,60,130]) {
+      const x = ladderX(d);
+      ctx.beginPath(); ctx.moveTo(x, ly-4); ctx.lineTo(x, ly+4); ctx.stroke();
+      ctx.fillText(d >= 130 ? '∞' : d, x, ly+6);
+    }
+    // depth-of-field span (widens with f-number)
+    const k = state.fnum * 0.06;
+    const nearD = state.focus / (1 + k);
+    const farD  = Math.min(FARF, state.focus * (1 + k));
+    const nx = ladderX(nearD), fx = ladderX(farD);
+    ctx.fillStyle = 'rgba(20,17,12,0.16)';
+    ctx.fillRect(nx, ly-6, Math.max(2, fx-nx), 12);
+    ctx.fillStyle = INK;
+    // focus marker
+    const mx = ladderX(state.focus);
+    ctx.beginPath();
+    ctx.moveTo(mx, ly-9); ctx.lineTo(mx-5, ly-17); ctx.lineTo(mx+5, ly-17); ctx.closePath();
+    ctx.fill();
+
+    ctx.textAlign = 'left';
+    ctx.restore();
+  }
+
+  // ---- vignette --------------------------------------------------------
+  function drawVignette(ctx) {
+    const g = ctx.createRadialGradient(W/2, H/2, H*0.28, W/2, H/2, H*0.72);
+    g.addColorStop(0, 'rgba(0,0,0,0)');
+    g.addColorStop(1, 'rgba(0,0,0,0.2)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0,0,W,H);
+  }
+
+  // ---- main loop -------------------------------------------------------
+  function frame(t) {
+    if (sceneDirty) { renderScene(); sceneDirty = false; }
+    const ctx = mainCtx;
+    ctx.setTransform(1,0,0,1,0,0);
+    ctx.clearRect(0,0,W,H);
+    ctx.fillStyle = PAPER; ctx.fillRect(0,0,W,H);
+    // mask the live image to the rounded viewfinder field
+    ctx.save();
+    roundRectPath(ctx, FIELD.x, FIELD.y, FIELD.w, FIELD.h, FIELD.r);
+    ctx.clip();
+    ctx.drawImage(sceneCanvas, 0, 0);
+    drawGrain(ctx);
+    drawVignette(ctx);
+    ctx.restore();
+    drawHUD(t);
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // ---- controls --------------------------------------------------------
+  const aperture = document.getElementById('aperture');
+  const focusEl  = document.getElementById('focus');
+  const isoEl    = document.getElementById('iso');
+  const apVal = document.getElementById('apVal');
+  const foVal = document.getElementById('foVal');
+  const isoVal = document.getElementById('isoVal');
+
+  function focusFromSlider(v) {
+    const t = v / 1000;
+    return NEARF * Math.pow(FARF/NEARF, t);
+  }
+  function sliderFromFocus(d) {
+    const t = Math.log(Math.max(NEARF, Math.min(FARF, d))/NEARF) / Math.log(FARF/NEARF);
+    return Math.round(t * 1000);
+  }
+
+  function syncLabels() {
+    apVal.textContent = 'ƒ/' + STOPS[+aperture.value];
+    foVal.textContent = focusLabel();
+    isoVal.textContent = ISOS[state.isoIdx];
+  }
+
+  aperture.addEventListener('input', () => {
+    state.fnum = STOPS[+aperture.value];
+    sceneDirty = true; syncLabels();
+  });
+  focusEl.addEventListener('input', () => {
+    state.focus = focusFromSlider(+focusEl.value);
+    sceneDirty = true; syncLabels();
+  });
+  isoEl.addEventListener('input', () => {
+    state.isoIdx = +isoEl.value;
+    syncLabels();   // grain is redrawn every frame, no scene re-render needed
+  });
+
+  // initialize from default slider values
+  state.fnum  = STOPS[+aperture.value];
+  state.focus = focusFromSlider(+focusEl.value);
+  state.isoIdx = +isoEl.value;
+  syncLabels();
+
+  // ---- look + tap-to-focus --------------------------------------------
+  let down = null;
+  view.addEventListener('pointerdown', e => {
+    down = { x:e.clientX, y:e.clientY, moved:false };
+    view.setPointerCapture(e.pointerId);
+  });
+  view.addEventListener('pointermove', e => {
+    const r = view.getBoundingClientRect();
+    const nx = ((e.clientX - r.left)/r.width) * 2 - 1;
+    const ny = ((e.clientY - r.top)/r.height) * 2 - 1;
+    state.yaw   = nx * 0.26;
+    state.pitch = -ny * 0.05;
+    sceneDirty = true;
+    if (down && (Math.abs(e.clientX-down.x) + Math.abs(e.clientY-down.y) > 5)) down.moved = true;
+  });
+  view.addEventListener('pointerup', e => {
+    if (down && !down.moved) tapFocus(e);
+    down = null;
+  });
+
+  function tapFocus(e) {
+    const r = view.getBoundingClientRect();
+    const px = (e.clientX - r.left) / r.width * W;
+    const py = (e.clientY - r.top) / r.height * H;
+
+    // 1) prefer a nearby object: focus on its actual depth
+    const proj = makeProjector();
+    let best = null, bestD2 = 46*46;
+    for (const o of objects) {
+      const p = proj([o.x, 2, o.z]);
+      if (p.z <= 0.4) continue;
+      const sx = focal*p.x/p.z + W/2, sy = -focal*p.y/p.z + H/2;
+      const d2 = (sx-px)**2 + (sy-py)**2;
+      if (d2 < bestD2) { bestD2 = d2; best = p.z; }
+    }
+    let dist;
+    if (best != null) {
+      dist = best;
+    } else if (py > H/2 + 2) {
+      // 2) otherwise focus on the ground under the cursor
+      dist = eyeH * focal / (py - H/2);
+    } else {
+      dist = FARF; // sky -> infinity
+    }
+    state.focus = Math.max(NEARF, Math.min(FARF, dist));
+    focusEl.value = sliderFromFocus(state.focus);
+    sceneDirty = true; syncLabels();
+  }
+
+})();
+</script>
+</body>
+</html>
