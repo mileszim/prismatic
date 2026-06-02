@@ -36,6 +36,19 @@ export function createSceneRenderer(W, H, segs) {
   temp.height = H;
   const tctx = temp.getContext('2d');
 
+  // Two scratch buffers for the cross-browser depth-of-field blur. Safari's
+  // CanvasRenderingContext2D.filter is unreliable (a silent no-op on iOS), so
+  // rather than `ctx.filter = 'blur()'` we approximate each band's circle of
+  // confusion by progressively halving it into a small buffer and scaling back
+  // up — the bilinear interpolation IS the blur. Uses only drawImage, so it
+  // renders identically in Chrome, Firefox, and Safari/iOS.
+  const dnA = document.createElement('canvas');
+  dnA.width = W; dnA.height = H;
+  const dnAc = dnA.getContext('2d');
+  const dnB = document.createElement('canvas');
+  dnB.width = W; dnB.height = H;
+  const dnBc = dnB.getContext('2d');
+
   // A second, fully-sharp render of the same wireframe. The microprism collar
   // samples this so its facets stay crisp regardless of the depth-of-field blur.
   const sharp = document.createElement('canvas');
@@ -50,6 +63,35 @@ export function createSceneRenderer(W, H, segs) {
   const dctx = depth.getContext('2d');
 
   let drawnSegs = [];
+
+  // Composite `temp` (the current band) onto the main canvas, blurred by `blur`
+  // px. Down-samples by repeated halving (a box average that keeps thin lines
+  // from dropping out), then a single up-scale whose smoothing spreads the ink
+  // — fainter as it widens, exactly like a real circle of confusion.
+  function drawWithBlur(blur) {
+    if (blur < 1) { ctx.drawImage(temp, 0, 0); return; }
+    const factor = blur < MAX_BLUR ? blur : MAX_BLUR;
+    const tw = Math.max(2, Math.round(W / factor));
+    const th = Math.max(2, Math.round(H / factor));
+
+    let srcC = temp, sw = W, sh = H;
+    let dstC = dnA, dstCtx = dnAc, otherC = dnB, otherCtx = dnBc;
+    const step = (nw, nh) => {
+      dstCtx.setTransform(1, 0, 0, 1, 0, 0);
+      dstCtx.clearRect(0, 0, nw, nh);
+      dstCtx.imageSmoothingEnabled = true;
+      dstCtx.drawImage(srcC, 0, 0, sw, sh, 0, 0, nw, nh);
+      srcC = dstC; sw = nw; sh = nh;
+      const c = dstC, cx = dstCtx;
+      dstC = otherC; dstCtx = otherCtx; otherC = c; otherCtx = cx;
+    };
+    while (sw > tw * 2 || sh > th * 2) {
+      step(Math.max(tw, sw >> 1), Math.max(th, sh >> 1));
+    }
+    step(tw, th); // final exact down-scale
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(srcC, 0, 0, tw, th, 0, 0, W, H); // up-scale = the blur
+  }
 
   function render(state) {
     const proj = makeProjector(state.yaw, state.pitch, state.camX, state.camZ);
@@ -97,10 +139,8 @@ export function createSceneRenderer(W, H, segs) {
 
       let blur = (DOF_K / f) * Math.abs(d - F) / Math.max(d, F, 1);
       if (blur > MAX_BLUR) blur = MAX_BLUR;
-      ctx.filter = blur > 0.15 ? `blur(${blur.toFixed(2)}px)` : 'none';
-      ctx.drawImage(temp, 0, 0);
+      drawWithBlur(blur);
     }
-    ctx.filter = 'none';
 
     // sharp pass (sampled by the microprism collar)
     sctx.setTransform(1, 0, 0, 1, 0, 0);
