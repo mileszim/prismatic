@@ -1,21 +1,28 @@
 // React bridge to the imperative rendering engine. Owns the <canvas>, creates
-// the engine once on mount, and pushes optics params in as props change.
+// the engine once on mount, pushes optics params in as props change, and exposes
+// an imperative capture() so the shutter button can grab a frame.
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useImperativeHandle, useRef, forwardRef } from 'react';
 import { createViewfinder } from '../engine/viewfinder.js';
 
-export default function Viewfinder({ fnum, focus, isoIdx, onFocusDistance, width = 920, height = 600 }) {
+const Viewfinder = forwardRef(function Viewfinder(
+  { fnum, focus, isoIdx, shutterSec, expo, onFocusDistance, onCapture, width = 920, height = 600 },
+  ref,
+) {
   const canvasRef = useRef(null);
   const engineRef = useRef(null);
 
-  // Keep the latest focus callback in a ref so the engine (created once) always
-  // calls the current handler without needing to be torn down and rebuilt.
+  // Keep the latest callbacks in refs so the engine (created once) always calls
+  // the current handlers without being torn down and rebuilt.
   const onFocusRef = useRef(onFocusDistance);
+  const onCaptureRef = useRef(onCapture);
   useEffect(() => { onFocusRef.current = onFocusDistance; });
+  useEffect(() => { onCaptureRef.current = onCapture; });
 
   useEffect(() => {
     const engine = createViewfinder(canvasRef.current, {
       onFocus: (dist) => onFocusRef.current?.(dist),
+      onCapture: (dataURL) => onCaptureRef.current?.(dataURL),
     });
     engineRef.current = engine;
     return () => {
@@ -25,12 +32,16 @@ export default function Viewfinder({ fnum, focus, isoIdx, onFocusDistance, width
   }, []);
 
   useEffect(() => {
-    engineRef.current?.setParams({ fnum, focus, isoIdx });
-  }, [fnum, focus, isoIdx]);
+    engineRef.current?.setParams({ fnum, focus, isoIdx, shutterSec, expo });
+  }, [fnum, focus, isoIdx, shutterSec, expo]);
+
+  useImperativeHandle(ref, () => ({ capture: () => engineRef.current?.capture() }), []);
 
   return (
     <div className="scope">
       <canvas ref={canvasRef} width={width} height={height} />
     </div>
   );
-}
+});
+
+export default Viewfinder;

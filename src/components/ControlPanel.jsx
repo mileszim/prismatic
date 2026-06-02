@@ -1,7 +1,7 @@
-// The instrument panel: the three camera controls (aperture, focus, ISO).
+// The instrument panel: the four camera controls (aperture, focus, ISO, shutter).
 
 import Slider from './Slider.jsx';
-import { STOPS, ISOS } from '../constants.js';
+import { STOPS, ISOS, SHUTTERS, shutterLabel } from '../constants.js';
 
 export default function ControlPanel({
   apIdx,
@@ -11,6 +11,8 @@ export default function ControlPanel({
   focusDisplay,
   isoIdx,
   setIsoIdx,
+  shutterIdx,
+  setShutterIdx,
 }) {
   return (
     <div className="panel">
@@ -40,6 +42,15 @@ export default function ControlPanel({
         max={ISOS.length - 1}
         value={isoIdx}
         onChange={setIsoIdx}
+      />
+      <Slider
+        label="Shutter"
+        display={shutterLabel(shutterIdx)}
+        hint="fast ◄──── exposure · motion ────► slow"
+        min={0}
+        max={SHUTTERS.length - 1}
+        value={shutterIdx}
+        onChange={setShutterIdx}
       />
     </div>
   );

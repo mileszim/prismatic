@@ -27,7 +27,7 @@ const MOVE_KEYS = {
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
-export function createInput(canvas, { state, W, H, objects, markDirty, onFocus }) {
+export function createInput(canvas, { state, W, H, objects, markDirty, onFocus, onShutter }) {
   let down = null;
   const held = new Set();
 
@@ -90,6 +90,16 @@ export function createInput(canvas, { state, W, H, objects, markDirty, onFocus }
 
   // ---- move + turn (keyboard) -----------------------------------------
   function onKeyDown(e) {
+    // Spacebar = shutter release (unless a control has focus, so it doesn't
+    // double-fire with a focused button or scrub a slider).
+    if (e.code === 'Space') {
+      const tag = e.target && e.target.tagName;
+      if (tag === 'INPUT' || tag === 'BUTTON' || tag === 'TEXTAREA') return;
+      e.preventDefault();
+      onShutter?.();
+      return;
+    }
+
     const intent = MOVE_KEYS[e.code];
     if (!intent) return;
     const inInput = e.target && e.target.tagName === 'INPUT';
