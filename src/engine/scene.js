@@ -71,23 +71,29 @@ export function createSceneRenderer(W, H, segs) {
   // grid for thin lines to snap to, so the image doesn't crawl or sparkle as the
   // focus ring and camera move. Two passes per axis turn the flat box kernel
   // into a soft tent, close to the Gaussian `ctx.filter` used to give. Uses only
-  // drawImage + globalAlpha, so it renders identically on Chrome and Safari/iOS.
+  // drawImage + compositing, so it renders identically on Chrome and Safari/iOS.
   //
-  // Each pass accumulates as a running mean: compositing the k-th shifted copy
-  // with globalAlpha = 1/(k+1) (source-over) leaves an exact average of all the
-  // copies — and it averages the alpha channel too, so line edges feather out.
+  // The average uses ADDITIVE ('lighter') compositing at globalAlpha = 1/taps.
+  // 'lighter' sums premultiplied colour AND alpha, so N copies each scaled by
+  // 1/N yield a true mean of the band — alpha included. That's what conserves
+  // ink: a thin opaque line spreads into a faint, wide band that gets lighter as
+  // it widens (real defocus), instead of a thick fully-opaque ribbon. (A plain
+  // source-over running mean can't do this — once a pixel is inked, later
+  // transparent taps can't lower its alpha, so every touched pixel stays solid.)
   const MAX_TAPS = 13; // cap taps per pass so wide blurs stay cheap on mobile
   function boxPass(src, dc, r, horiz) {
     dc.setTransform(1, 0, 0, 1, 0, 0);
     dc.clearRect(0, 0, W, H);
     const taps = Math.min(2 * r + 1, MAX_TAPS);
     const span = 2 * r;
+    dc.globalCompositeOperation = 'lighter';
+    dc.globalAlpha = 1 / taps;
     for (let i = 0; i < taps; i++) {
       const o = taps === 1 ? 0 : -r + Math.round((i * span) / (taps - 1));
-      dc.globalAlpha = 1 / (i + 1);
       dc.drawImage(src, horiz ? o : 0, horiz ? 0 : o);
     }
     dc.globalAlpha = 1;
+    dc.globalCompositeOperation = 'source-over';
   }
 
   function drawWithBlur(blur) {
